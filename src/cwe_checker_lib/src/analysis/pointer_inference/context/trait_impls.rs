@@ -1,3 +1,5 @@
+use crate::analysis::pointer_inference::detector;
+
 use super::*;
 
 impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Context<'a> {
@@ -75,9 +77,26 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
         _target_node: &crate::analysis::graph::Node,
         _calling_convention: &Option<String>,
     ) -> Option<State> {
-        if let Jmp::Call { .. } = call_term.term {
+        if let Jmp::Call { ref target, .. } = call_term.term {
             // No information flows from caller to the callee in the analysis.
-            None
+            //println!("State: {:?}", _state.stack_id);
+            let fn_signature = self.fn_signatures.get(&target).unwrap();
+            let mut fn_entry_state = State::from_fn_sig(
+                fn_signature,
+                &self.project.stack_pointer_register,
+                target.clone(),
+            );
+            let cconv = match self
+            .project
+            .get_specific_calling_convention(_calling_convention)
+            {
+                Some(cconv) => cconv,
+                None => {
+                    panic!("No calling convention found for function {:?}", target);
+                }
+            };
+            
+            Some(fn_entry_state)
         } else if let Jmp::CallInd { .. } = call_term.term {
             panic!("Indirect call edges not yet supported.")
         } else {
@@ -229,17 +248,34 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
         Some(state_after_return)
     }
 
+
     /// Update the state according to the effect of a call to an extern symbol
     /// or an indirect call where nothing is known about the call target.
     fn update_call_stub(&self, state: &State, call: &Term<Jmp>) -> Option<State> {
         let call_target = match &call.term {
             Jmp::Call { target, .. } => target,
-            Jmp::CallInd { .. } => {
+            Jmp::CallInd { target, .. } => {
                 if self.is_indirect_call_with_top_target(state, call) {
                     // We know nothing about the call target.
                     return self.handle_call_to_generic_unknown_function(state);
                 } else {
-                    return None;
+                    // resolve JNI calls
+
+                    if let Expression::Var(var) = target {
+                        let value = state.get_register(var);
+                        let function_name = detector::resolve_jni_function_from_address(&value);
+                        if let Some((name, offset)) = function_name {
+                            println!("Function name: {}", name);
+                            println!("Offset: {}", offset);
+                            let new_state = detector::process_jni_call(&self.project, state, &name, offset, call   );
+                            return match new_state {
+                                Some(new_state) => Some(new_state),
+                                None => Some(state.clone()),
+                            };
+                        }
+                    } 
+
+                    return Some(state.clone());
                 }
             }
             _ => panic!("Malformed control flow graph encountered."),
@@ -283,7 +319,7 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                         extern_symbol,
                     );
 
-                    let return_value =
+                    let return_value: DataDomain<IntervalDomain> =
                         self.compute_return_value_for_stubbed_function(state, extern_symbol);
                     new_state.set_register(&cconv.integer_return_register[0], return_value);
 

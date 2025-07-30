@@ -29,16 +29,18 @@ use super::forward_interprocedural_fixpoint::GeneralizedContext;
 use super::interprocedural_fixpoint_generic::NodeValue;
 use crate::abstract_domain::{AbstractIdentifier, DataDomain, IntervalDomain, SizedDomain};
 use crate::analysis::forward_interprocedural_fixpoint::Context as _;
-use crate::analysis::graph::{Graph, Node};
+use crate::analysis::graph::{Edge, Graph, Node};
 use crate::checkers::prelude::*;
 use crate::intermediate_representation::*;
 use crate::prelude::*;
 use crate::utils::log::*;
+use petgraph::csr::Edges;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::IntoNodeReferences;
+use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use std::collections::{BTreeMap, HashMap};
 
 mod context;
+pub mod detector;
 pub mod object;
 mod object_list;
 mod state;
@@ -91,7 +93,7 @@ pub struct PointerInference<'a> {
     addresses_at_defs: HashMap<Tid, Data>,
     /// Maps certain TIDs like the TIDs of [`Jmp`] instructions to the pointer inference state at that TID.
     /// The map will be filled after the fixpoint computation finished.
-    states_at_tids: HashMap<Tid, State>,
+    pub states_at_tids: HashMap<Tid, State>,
     /// Maps the TIDs of call instructions to a map mapping callee IDs to the corresponding value in the caller.
     /// The map will be filled after the fixpoint computation finished.
     id_renaming_maps_at_calls: HashMap<Tid, BTreeMap<AbstractIdentifier, Data>>,
@@ -137,6 +139,7 @@ impl<'a> PointerInference<'a> {
                 super::interprocedural_fixpoint_generic::NodeValue::Value(fn_entry_state),
             );
         }
+        
         PointerInference {
             computation: fixpoint_computation,
             log_collector: log_sender,
@@ -146,6 +149,108 @@ impl<'a> PointerInference<'a> {
             states_at_tids: HashMap::new(),
             id_renaming_maps_at_calls: HashMap::new(),
         }
+    }
+    
+    /// Writes a Data object to a specific parameter of a function by index.
+    ///
+    /// This function looks up the entry node for the given function, retrieves the associated 
+    /// state, and then writes the provided Data object to the parameter at the specified index.
+    ///
+    /// # Arguments
+    ///
+    /// * `function_tid` - The Tid of the function containing the parameter
+    /// * `param_index` - The index of the parameter to write to
+    /// * `data` - The Data object to write to the parameter
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` if the operation was successful
+    /// * `Err(Error)` if the parameter could not be found or the write operation failed
+    pub fn write_to_function_parameter(
+        &mut self,
+        function_tid: &Tid,
+        param_index: usize,
+        data: Data,
+    ) -> Result<(), Error> {
+        // Get the context to access function signatures and the global memory image
+        let context = self.computation.get_context().get_context();
+        let fn_signature = context.fn_signatures.get(function_tid)
+            .ok_or_else(|| anyhow!("Function signature not found for {}", function_tid))?;
+        
+        // Find the entry node for the function
+        let sub_to_entry_node_map = crate::analysis::graph::get_entry_nodes_of_subs(context.graph);
+        let entry_node = sub_to_entry_node_map.get(function_tid)
+            .ok_or_else(|| anyhow!("Function entry node not found for {}", function_tid))?;
+        
+        // Get the state at the entry node
+        let node_value = self.computation.get_node_value(*entry_node)
+            .ok_or_else(|| anyhow!("No state found at entry node for {}", function_tid))?;
+        
+        // Get the state and modify it
+        match node_value {
+            NodeValue::Value(state) => {
+                let mut new_state = state.clone();
+                new_state.write_to_parameter(
+                    param_index,
+                    data,
+                    fn_signature,
+                    &context.project.runtime_memory_image,
+                )?;
+                
+                // Update the node with the modified state
+                self.computation.set_node_value(*entry_node, NodeValue::Value(new_state));
+                Ok(())
+            },
+            _ => Err(anyhow!("No state found at entry node for {}", function_tid)),
+        }
+    }
+
+    /// Writes a Data object to a specific return value of a function call by index.
+    ///
+    /// This function looks up the state after the call returns and writes the provided Data object
+    /// to the return register at the specified index according to the calling convention.
+    ///
+    /// # Arguments
+    ///
+    /// * `call_tid` - The Tid of the call instruction
+    /// * `return_index` - The index of the return value to write to (0 for first return value, etc.)
+    /// * `data` - The Data object to write to the return value
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` if the operation was successful
+    /// * `Err(Error)` if the return value could not be found or the write operation failed
+    pub fn write_to_return_value(
+        &mut self,
+        state: &mut State,
+        call_tid: &Tid,
+        return_index: usize,
+        data: Data,
+    ) -> Result<(), Error> {
+       
+        // Get the context to access calling conventions
+        let context = self.computation.get_context().get_context();
+        
+        // Get the calling convention - we need to determine which one to use
+        // For now, we'll use the default calling convention
+        let cconv = context.project.get_specific_calling_convention(&None)
+            .ok_or_else(|| anyhow!("No calling convention found for call {}", call_tid))?;
+        
+        // Get all return registers
+        let return_registers = cconv.get_all_return_register();
+        
+        // Check if the return index is valid
+        if return_index >= return_registers.len() {
+            return Err(anyhow!("Return index {} out of bounds for call {}", return_index, call_tid));
+        }
+        
+        // Get the return register at the specified index
+        let return_register = return_registers[return_index];
+        
+        // Write the data to the return register
+        state.set_register(return_register, data);
+        
+        Ok(())
     }
 
     /// Compute the fixpoint of the pointer inference analysis.
@@ -249,7 +354,7 @@ impl<'a> PointerInference<'a> {
     }
 
     /// Fill the various result maps of `self` that are needed for the [`VsaResult`](crate::analysis::vsa_results::VsaResult) trait implementation.
-    fn fill_vsa_result_maps(&mut self) {
+    pub fn fill_vsa_result_maps(&mut self) {
         let context = self.computation.get_context().get_context();
         let graph = self.computation.get_graph();
         for node in graph.node_indices() {
@@ -296,6 +401,7 @@ impl<'a> PointerInference<'a> {
                         Some(NodeValue::Value(value)) => value,
                         _ => continue,
                     };
+                    
                     for jmp in &blk.term.jmps {
                         self.states_at_tids
                             .insert(jmp.tid.clone(), node_state.clone());

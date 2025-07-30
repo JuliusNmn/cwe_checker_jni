@@ -4,6 +4,7 @@ use super::Data;
 use crate::abstract_domain::*;
 use crate::analysis::function_signature::AccessPattern;
 use crate::analysis::function_signature::FunctionSignature;
+use crate::analysis::graph::Graph;
 use crate::intermediate_representation::*;
 use crate::prelude::*;
 use std::collections::HashSet;
@@ -383,6 +384,108 @@ impl State {
                 size: self.stack_id.bytesize(),
             },
         )
+    }
+
+    /// Writes a Data object to a specific parameter of the current function by index.
+    ///
+    /// Given a parameter index and a Data object, this function writes the Data to the parameter
+    /// at the specified index in the current function state. It follows the same ordering logic
+    /// as used in the `add_param` method to ensure parameters are accessed in the correct order.
+    ///
+    /// # Arguments
+    ///
+    /// * `param_index` - The index of the parameter to write to
+    /// * `data` - The Data object to write to the parameter
+    /// * `fn_sig` - The function signature containing parameter information
+    /// * `global_memory` - The global memory image
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` if the operation was successful
+    /// * `Err(Error)` if the parameter could not be found or the write operation failed
+    pub fn write_to_parameter(
+        &mut self,
+        param_index: usize,
+        data: Data,
+        fn_sig: &FunctionSignature,
+        global_memory: &RuntimeMemoryImage,
+    ) -> Result<(), Error> {
+        // Get sorted params by recursion depth to match how they're processed in add_param
+        let sorted_params = sort_params_by_recursion_depth(&fn_sig.parameters);
+        
+        // Find the parameter at the specified index
+        let mut current_index = 0;
+        let mut param_location = None;
+        
+        'outer: for params in sorted_params.values() {
+            for (location, _) in params {
+                if current_index == param_index {
+                    param_location = Some(location);
+                    break 'outer;
+                }
+                current_index += 1;
+            }
+        }
+        
+        let param = param_location
+            .ok_or_else(|| anyhow!("Parameter index {} out of bounds", param_index))?;
+        
+        // Write the data to the parameter location
+        match param {
+            AbstractLocation::Register(var) => {
+                self.set_register(var, data);
+                Ok(())
+            }
+            AbstractLocation::Pointer(_, _) => {
+                let (parent_location, offset) =
+                    param.get_parent_location(self.stack_id.bytesize()).unwrap();
+                let parent_id =
+                    AbstractIdentifier::new(self.stack_id.get_tid().clone(), parent_location);
+                
+                self.store_value(
+                    &Data::from_target(
+                        parent_id,
+                        Bitvector::from_i64(offset)
+                            .into_resize_signed(self.stack_id.bytesize())
+                            .into(),
+                    ),
+                    &data,
+                    global_memory,
+                )
+            }
+            AbstractLocation::GlobalAddress { .. } => Ok(()),
+            AbstractLocation::GlobalPointer(_, _) => {
+                let (parent_location, offset) =
+                    param.get_parent_location(self.stack_id.bytesize()).unwrap();
+                
+                if let AbstractLocation::GlobalAddress { address, size: _ } = parent_location {
+                    let parent_id = self.get_global_mem_id();
+                    self.store_value(
+                        &Data::from_target(
+                            parent_id,
+                            Bitvector::from_u64(address.wrapping_add(offset as u64))
+                                .into_resize_signed(self.stack_id.bytesize())
+                                .into(),
+                        ),
+                        &data,
+                        global_memory,
+                    )
+                } else {
+                    let parent_id =
+                        AbstractIdentifier::new(self.stack_id.get_tid().clone(), parent_location);
+                    self.store_value(
+                        &Data::from_target(
+                            parent_id,
+                            Bitvector::from_i64(offset)
+                                .into_resize_signed(self.stack_id.bytesize())
+                                .into(),
+                        ),
+                        &data,
+                        global_memory,
+                    )
+                }
+            }
+        }
     }
 }
 
