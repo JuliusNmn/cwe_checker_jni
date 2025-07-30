@@ -17,7 +17,7 @@ mod mem_region;
 pub use mem_region::MemRegion;
 
 mod interval;
-pub use interval::{Interval, IntervalDomain};
+pub use interval::{Interval, IntervalDomain, PointerInfo};
 
 mod bricks;
 pub use bricks::{BrickDomain, BricksDomain};

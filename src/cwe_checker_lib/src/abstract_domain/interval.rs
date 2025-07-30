@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt::Display;
 
 use crate::intermediate_representation::*;
@@ -10,6 +11,79 @@ mod simple_interval;
 pub use simple_interval::*;
 
 mod bin_ops;
+
+/// Structured pointer information for interval domains.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+pub struct PointerInfo {
+    pub tags: BTreeSet<String>,
+    pub class_id: BTreeSet<String>,
+    pub method_id: BTreeSet<String>,
+    pub field_id: BTreeSet<String>,
+}
+
+impl PointerInfo {
+    pub fn new() -> Self {
+        PointerInfo {
+            tags: BTreeSet::new(),
+            class_id: BTreeSet::new(),
+            method_id: BTreeSet::new(),
+            field_id: BTreeSet::new(),
+        }
+    }
+
+    /// Merge two PointerInfo objects by unioning all respective sets.
+    pub fn merge(&self, other: &PointerInfo) -> PointerInfo {
+        PointerInfo {
+            tags: &self.tags | &other.tags,
+            class_id: &self.class_id | &other.class_id,
+            method_id: &self.method_id | &other.method_id,
+            field_id: &self.field_id | &other.field_id,
+        }
+    }
+
+    /// Clone the PointerInfo (already derived, but explicit method for clarity)
+    pub fn clone_pointer_info(&self) -> PointerInfo {
+        self.clone()
+    }
+
+    /// Construct a PointerInfo with a single tag.
+    pub fn from_tag(tag: String) -> Self {
+        let mut tags = BTreeSet::new();
+        tags.insert(tag);
+        PointerInfo {
+            tags,
+            class_id: BTreeSet::new(),
+            method_id: BTreeSet::new(),
+            field_id: BTreeSet::new(),
+        }
+    }
+    /// Add a class ID and return a new PointerInfo
+    pub fn with_class_id(&self, class_id: String) -> PointerInfo {
+        let mut new_info = self.clone();
+        new_info.class_id.insert(class_id);
+        new_info
+    }
+
+    pub fn with_class_ids(&self, class_ids: BTreeSet<String>) -> PointerInfo {
+        let mut new_info = self.clone();
+        new_info.class_id = &self.class_id | &class_ids;
+        new_info
+    }
+
+    /// Add a method ID and return a new PointerInfo
+    pub fn with_method_id(&self, method_id: String) -> PointerInfo {
+        let mut new_info = self.clone();
+        new_info.method_id.insert(method_id);
+        new_info
+    }
+
+    /// Add a field ID and return a new PointerInfo
+    pub fn with_field_id(&self, field_id: String) -> PointerInfo {
+        let mut new_info = self.clone();
+        new_info.field_id.insert(field_id);
+        new_info
+    }
+}
 
 /// An abstract domain representing values in an interval range with strides and widening hints.
 ///
@@ -34,6 +108,7 @@ pub struct IntervalDomain {
     /// A delay counter to prevent unnecessary widenings.
     /// See the [`IntervalDomain::signed_merge_and_widen`] method for its usage in the widening strategy.
     widening_delay: u64,
+    pub pointer_info: PointerInfo,
 }
 
 impl From<Interval> for IntervalDomain {
@@ -44,6 +119,7 @@ impl From<Interval> for IntervalDomain {
             widening_lower_bound: None,
             widening_upper_bound: None,
             widening_delay: 0,
+            pointer_info: PointerInfo::new(),
         }
     }
 }
@@ -59,6 +135,28 @@ impl IntervalDomain {
             widening_upper_bound: None,
             widening_lower_bound: None,
             widening_delay: 0,
+            pointer_info: PointerInfo::new(),
+        }
+    }
+
+    pub fn new_pointer(pointer_info: PointerInfo, start: Bitvector, end: Bitvector) -> Self {
+        IntervalDomain {
+            interval: Interval::new(start, end, 1),
+            widening_upper_bound: None,
+            widening_lower_bound: None,
+            widening_delay: 0,
+            pointer_info,
+        }
+    }
+
+    /// Returns a new IntervalDomain with the same interval bounds but with the provided pointer_info
+    pub fn with_pointer_info(&self, pointer_info: PointerInfo) -> Self {
+        IntervalDomain {
+            interval: self.interval.clone(),
+            widening_upper_bound: self.widening_upper_bound.clone(),
+            widening_lower_bound: self.widening_lower_bound.clone(), 
+            widening_delay: self.widening_delay,
+            pointer_info,
         }
     }
 
@@ -118,6 +216,9 @@ impl IntervalDomain {
         merged_domain.update_widening_upper_bound(&self.widening_upper_bound);
         merged_domain.update_widening_upper_bound(&other.widening_upper_bound);
         merged_domain.widening_delay = std::cmp::max(self.widening_delay, other.widening_delay);
+
+        // Merge pointer info using the new merge method
+        merged_domain.pointer_info = self.pointer_info.merge(&other.pointer_info);
 
         merged_domain
     }
@@ -229,6 +330,7 @@ impl IntervalDomain {
             widening_lower_bound: lower_bound,
             widening_upper_bound: upper_bound,
             widening_delay: self.widening_delay,
+            pointer_info: self.pointer_info.clone(),
         }
     }
 
@@ -248,6 +350,7 @@ impl IntervalDomain {
                 .widening_upper_bound
                 .map(|bitvec| bitvec.into_sign_extend(width).unwrap()),
             widening_delay: self.widening_delay,
+            pointer_info: self.pointer_info.clone(),
         }
     }
 
@@ -296,6 +399,7 @@ impl IntervalDomain {
                 .widening_delay
                 .overflowing_shr(low_byte.as_bit_length() as u32)
                 .0,
+            pointer_info: self.pointer_info.clone(),
         }
     }
 
@@ -341,6 +445,7 @@ impl IntervalDomain {
             widening_lower_bound: lower_bound,
             widening_upper_bound: upper_bound,
             widening_delay: self.widening_delay,
+            pointer_info: self.pointer_info.clone(),
         }
     }
 
@@ -374,6 +479,7 @@ impl IntervalDomain {
             widening_lower_bound: lower_bound,
             widening_upper_bound: upper_bound,
             widening_delay,
+            pointer_info: self.pointer_info.clone(),
         }
     }
 }
@@ -545,6 +651,7 @@ impl SizedDomain for IntervalDomain {
             widening_lower_bound: None,
             widening_upper_bound: None,
             widening_delay: 0,
+            pointer_info: PointerInfo::new(),
         }
     }
 }
@@ -585,6 +692,7 @@ impl RegisterDomain for IntervalDomain {
                     widening_lower_bound: None,
                     widening_upper_bound: None,
                     widening_delay: std::cmp::max(self.widening_delay, rhs.widening_delay),
+                    pointer_info: self.pointer_info.clone(),
                 }
             }
             Piece => self.piece(rhs),
@@ -616,6 +724,7 @@ impl RegisterDomain for IntervalDomain {
                     widening_lower_bound: new_lower_bound,
                     widening_upper_bound: new_upper_bound,
                     widening_delay: self.widening_delay,
+                    pointer_info: self.pointer_info.clone(),
                 }
             }
             IntNegate => IntervalDomain {
@@ -623,6 +732,7 @@ impl RegisterDomain for IntervalDomain {
                 widening_lower_bound: None,
                 widening_upper_bound: None,
                 widening_delay: self.widening_delay,
+                pointer_info: self.pointer_info.clone(),
             },
             BoolNegate => {
                 if self.interval.start == self.interval.end {
@@ -742,6 +852,7 @@ impl From<Bitvector> for IntervalDomain {
             widening_lower_bound: None,
             widening_upper_bound: None,
             widening_delay: 0,
+            pointer_info: PointerInfo::new(),
         }
     }
 }
