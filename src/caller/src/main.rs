@@ -518,22 +518,19 @@ fn run_with_ghidra(args: &CmdlineArgs) -> Result<(), Error> {
                     let sub = project.program.term.subs.iter().find(|(_, sub)| sub.tid.address() == target.address());
                     if let Some(sub) = sub {
                         let sub_name = &sub.1.term.name;
-                        if sub_name.starts_with("llvm_") {
-                            
-                            println!("static call to {:}", sub_name);
-                            if let Some(state) = computation.states_at_tids.get(&jmp.tid) {
-                                for i in 0..3 {
-                                    let value = state.get_register(params[i]);
-                                    if let Some(absolute_value) = value.get_absolute_value() {
-                                        match absolute_value.try_to_offset() {
-                                            Ok(offset) => {
-                                                if offset == jnienv_addri {
-                                                    println!("[jni_detector] JNIEnv passed to function {}", sub_name);
-                                                }
+                        println!("static call to {:}", sub_name);
+                        if let Some(state) = computation.states_at_tids.get(&jmp.tid) {
+                            for i in 0..3 {
+                                let value = state.get_register(params[i]);
+                                if let Some(absolute_value) = value.get_absolute_value() {
+                                    match absolute_value.try_to_offset() {
+                                        Ok(offset) => {
+                                            if offset == jnienv_addri {
+                                                println!("[jni_detector] JNIEnv passed to function {}", sub_name);
                                             }
-                                            Err(_) => {
-                                                
-                                            }
+                                        }
+                                        Err(_) => {
+                                            
                                         }
                                     }
                                 }
